@@ -1,0 +1,30 @@
+// Shared 24-point read-action icon. Geometry matches the existing Telegram eye,
+// without its diagonal line. Menu callers apply the same tint as their neighbors.
+import Foundation
+import CoreGraphics
+let root=URL(fileURLWithPath:CommandLine.arguments[1])
+let url=root.appendingPathComponent("submodules/TelegramUI/Images.xcassets/Chat/Context Menu/MarkAsRead.imageset/ic_lt_markasread.pdf")
+var box=CGRect(x:0,y:0,width:24,height:24)
+let context=CGContext(url as CFURL,mediaBox:&box,nil)!
+context.beginPDFPage(nil)
+context.setFillColor(CGColor(gray:1,alpha:1))
+let path=CGMutablePath()
+path.move(to:CGPoint(x:12,y:5.734))
+path.addCurve(to:CGPoint(x:20.898,y:10.713),control1:CGPoint(x:16.881,y:5.734),control2:CGPoint(x:19.841,y:9.208))
+path.addCurve(to:CGPoint(x:20.945,y:12.866),control1:CGPoint(x:21.353,y:11.361),control2:CGPoint(x:21.368,y:12.202))
+path.addCurve(to:CGPoint(x:12,y:18.264),control1:CGPoint(x:19.932,y:14.458),control2:CGPoint(x:16.999,y:18.264))
+path.addCurve(to:CGPoint(x:3.055,y:12.866),control1:CGPoint(x:7.001,y:18.264),control2:CGPoint(x:4.068,y:14.458))
+path.addCurve(to:CGPoint(x:3.102,y:10.713),control1:CGPoint(x:2.632,y:12.202),control2:CGPoint(x:2.647,y:11.361))
+path.addCurve(to:CGPoint(x:12,y:5.734),control1:CGPoint(x:4.159,y:9.208),control2:CGPoint(x:7.119,y:5.734))
+path.closeSubpath()
+path.move(to:CGPoint(x:12,y:7.064))
+path.addCurve(to:CGPoint(x:4.190,y:11.478),control1:CGPoint(x:7.793,y:7.064),control2:CGPoint(x:5.187,y:10.068))
+path.addCurve(to:CGPoint(x:4.177,y:12.152),control1:CGPoint(x:4.047,y:11.681),control2:CGPoint(x:4.041,y:11.938))
+path.addCurve(to:CGPoint(x:12,y:16.934),control1:CGPoint(x:5.140,y:13.665),control2:CGPoint(x:7.727,y:16.934))
+path.addCurve(to:CGPoint(x:19.823,y:12.152),control1:CGPoint(x:16.274,y:16.934),control2:CGPoint(x:18.860,y:13.665))
+path.addCurve(to:CGPoint(x:19.810,y:11.478),control1:CGPoint(x:19.959,y:11.938),control2:CGPoint(x:19.953,y:11.681))
+path.addCurve(to:CGPoint(x:12,y:7.064),control1:CGPoint(x:18.820,y:10.068),control2:CGPoint(x:16.207,y:7.064))
+path.closeSubpath();context.addPath(path);context.drawPath(using:.eoFill)
+context.setStrokeColor(CGColor(gray:1,alpha:1));context.setLineWidth(1.33)
+context.strokeEllipse(in:CGRect(x:8.935,y:8.935,width:6.13,height:6.13))
+context.endPDFPage();context.closePDF()
