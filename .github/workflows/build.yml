@@ -1,0 +1,213 @@
+name: Build IPA
+
+# MARK: Solvgram — builds the IPA on GitHub's Xcode 27 runner (macOS 27, Xcode 27.1 by default, as
+# versions.json asks) and, when asked, publishes it as a GitHub release tagged v<solvgram-version> (versions.json "solvgram"; the
+# Telegram version is "app"). The build number is internal and never appears in release names.
+#
+# Needs two repository secrets, SOLVGRAM_API_ID and SOLVGRAM_API_HASH (your own, from my.telegram.org); the
+# build configuration is made from them with the bundle id given below. A full configuration JSON in the
+# secret SOLVGRAM_BUILD_CONFIGURATION, when present, is used instead.
+#
+# Signing: the IPA is ad-hoc signed without provisioning profiles (--disableProvisioningProfiles), to be
+# re-signed on install. Make.py still reads the push environment from a profile issued for
+# <team_id>.<bundle_id>, so the job writes one for it, signed with a throwaway key. A real codesigning
+# directory (profiles/ and certs/) can be given as the secret SOLVGRAM_CODESIGNING, as
+# `tar -czf - -C <dir> . | base64`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish the IPA as a GitHub release
+        type: boolean
+        default: false
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: false
+      bundle_id:
+        description: Bundle ID (when no SOLVGRAM_BUILD_CONFIGURATION secret)
+        type: string
+        default: app.solvgram
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ipa
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Preview image: macOS 27 with Xcode 27.0, 27.1 (default) and 27.2.
+    runs-on: xcode-27
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Keep history for build metadata and release notes.
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          XCODE_VERSION=$(python3 -c 'import json;print(json.load(open("versions.json"))["xcode"])')
+          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          xcodebuild -version
+
+      - name: Free disk space
+        run: |
+          df -h /
+          XCODE_VERSION=$(python3 -c 'import json;print(json.load(open("versions.json"))["xcode"])')
+          # Every Xcode but the one in use, and the simulator runtimes (a device build needs none).
+          for app in /Applications/Xcode_*.app; do
+            case "$app" in
+              "/Applications/Xcode_${XCODE_VERSION}.app") ;;
+              *) [ -L "$app" ] || sudo rm -rf "$app" ;;
+            esac
+          done
+          xcrun simctl delete all || true
+          xcrun simctl runtime delete all || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet /usr/local/lib/node_modules || true
+          df -h /
+
+      - name: Check Solvgram logic
+        run: |
+          zsh Tests/SolvgramAudit/build.sh
+          python3 Tests/SolvgramAudit/filter.py
+          python3 Tests/SolvgramAudit/version.py
+
+      - name: Write build configuration
+        env:
+          SOLVGRAM_BUILD_CONFIGURATION: ${{ secrets.SOLVGRAM_BUILD_CONFIGURATION }}
+          SOLVGRAM_API_ID: ${{ secrets.SOLVGRAM_API_ID }}
+          SOLVGRAM_API_HASH: ${{ secrets.SOLVGRAM_API_HASH }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/solvgram"
+          CONFIG="$RUNNER_TEMP/solvgram/configuration.json"
+          if [ -n "$SOLVGRAM_BUILD_CONFIGURATION" ]; then
+            printf '%s' "$SOLVGRAM_BUILD_CONFIGURATION" > "$CONFIG"
+          elif [ -n "$SOLVGRAM_API_ID" ] && [ -n "$SOLVGRAM_API_HASH" ]; then
+            python3 - "$CONFIG" <<'PY'
+          import json, os, sys
+          json.dump({
+              "sg_config": "{}",
+              "bundle_id": os.environ.get("BUNDLE_ID") or "app.solvgram",
+              "api_id": os.environ["SOLVGRAM_API_ID"].strip(),
+              "api_hash": os.environ["SOLVGRAM_API_HASH"].strip(),
+              "team_id": "SOLVGRAM00",
+              "app_center_id": "0",
+              "is_internal_build": "false",
+              "is_appstore_build": "false",
+              "appstore_id": "0",
+              "app_specific_url_scheme": "tg",
+              "premium_iap_product_id": "",
+              "enable_siri": False,
+              "enable_icloud": False,
+          }, open(sys.argv[1], "w"), indent=2)
+          PY
+          else
+            echo "::error::Add the repository secrets SOLVGRAM_API_ID and SOLVGRAM_API_HASH (from my.telegram.org)."
+            exit 1
+          fi
+          python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));print("bundle_id:", c["bundle_id"], "team_id:", c["team_id"])' "$CONFIG"
+
+      - name: Codesigning
+        env:
+          SOLVGRAM_CODESIGNING: ${{ secrets.SOLVGRAM_CODESIGNING }}
+        run: |
+          DIR="$RUNNER_TEMP/solvgram/codesigning"
+          mkdir -p "$DIR/profiles" "$DIR/certs"
+          echo "CODESIGNING_PATH=$DIR" >> "$GITHUB_ENV"
+          if [ -n "$SOLVGRAM_CODESIGNING" ]; then
+            printf '%s' "$SOLVGRAM_CODESIGNING" | base64 --decode | tar -xzf - -C "$DIR"
+            exit 0
+          fi
+          # A stand-in profile for the main app: only its application identifier and push environment are read.
+          read TEAM_ID BUNDLE_ID < <(python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));print(c["team_id"], c["bundle_id"])' "$RUNNER_TEMP/solvgram/configuration.json")
+          cat > "$RUNNER_TEMP/solvgram/profile.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Name</key><string>Solvgram CI</string>
+            <key>TeamIdentifier</key><array><string>${TEAM_ID}</string></array>
+            <key>Entitlements</key>
+            <dict>
+              <key>application-identifier</key><string>${TEAM_ID}.${BUNDLE_ID}</string>
+              <key>aps-environment</key><string>production</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=Solvgram CI" \
+            -keyout "$RUNNER_TEMP/solvgram/ci.key" -out "$RUNNER_TEMP/solvgram/ci.crt" 2>/dev/null
+          openssl smime -sign -nodetach -binary -outform der \
+            -in "$RUNNER_TEMP/solvgram/profile.plist" \
+            -signer "$RUNNER_TEMP/solvgram/ci.crt" -inkey "$RUNNER_TEMP/solvgram/ci.key" \
+            -out "$DIR/profiles/Telegram.mobileprovision"
+          openssl smime -verify -noverify -inform der -in "$DIR/profiles/Telegram.mobileprovision" | grep application-identifier
+
+      - name: Version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APP_VERSION=$(python3 -c 'import json;print(json.load(open("versions.json"))["app"])')
+          SOLVGRAM_VERSION=$(python3 -c 'import json;print(json.load(open("versions.json"))["solvgram"])')
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[].tag_name' > "$RUNNER_TEMP/solvgram/release-tags.txt"
+          gh api "repos/$GITHUB_REPOSITORY/tags" --paginate --jq '.[].name' >> "$RUNNER_TEMP/solvgram/release-tags.txt"
+          BUILD_NUMBER=$(python3 build-system/SolvgramVersion.py "$RUNNER_TEMP/solvgram/release-tags.txt")
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "SOLVGRAM_VERSION=$SOLVGRAM_VERSION" >> "$GITHUB_ENV"
+          echo "Solvgram $SOLVGRAM_VERSION, Telegram $APP_VERSION (internal build $BUILD_NUMBER)"
+
+      - name: Build
+        run: |
+          python3 -u build-system/Make/Make.py \
+            --overrideXcodeVersion \
+            --cacheDir "$RUNNER_TEMP/bazel-cache" \
+            build \
+            --configurationPath "$RUNNER_TEMP/solvgram/configuration.json" \
+            --codesigningInformationPath "$CODESIGNING_PATH" \
+            --disableProvisioningProfiles \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER" \
+            --outputBuildArtifactsPath "$RUNNER_TEMP/artifacts"
+          mv "$RUNNER_TEMP/artifacts/Solvgram.ipa" "$RUNNER_TEMP/artifacts/Solvgram.ipa"
+          mv "$RUNNER_TEMP/artifacts/Solvgram.DSYMs.zip" "$RUNNER_TEMP/artifacts/Solvgram.DSYMs.zip"
+          ls -la "$RUNNER_TEMP/artifacts"
+
+      - name: Disk usage after the build
+        if: always()
+        run: df -h /
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Solvgram-${{ env.APP_VERSION }}-${{ env.BUILD_NUMBER }}
+          path: |
+            ${{ runner.temp }}/artifacts/Solvgram.ipa
+            ${{ runner.temp }}/artifacts/Solvgram.DSYMs.zip
+          retention-days: 30
+
+      - name: Publish release
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          # `create` fails for an existing release instead of replacing its IPA.
+          args=()
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          # One release per Solvgram version: bump "solvgram" in versions.json first.
+          gh release create "v$SOLVGRAM_VERSION" \
+            "$RUNNER_TEMP/artifacts/Solvgram.ipa" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Solvgram $SOLVGRAM_VERSION" \
+            --generate-notes \
+            --notes 'The IPA is ad-hoc signed and requires re-signing before installation.' \
+            "${args[@]}"
